@@ -1,0 +1,177 @@
+BROKER SCHEMA com.saib.esb.tanfeeth.retry
+PATH com.saib.esb.tanfeeth.interceptor.common;
+
+-- =====================================================================
+-- DispatchRetry_Inspect
+--
+-- Single decision point for the generic retry dispatcher. Reads the
+-- shared MQRFH2.usr contract, validates it, and sets the outgoing MQ
+-- destination directly. Outcomes:
+--
+--   * Dispatch  — message is good and due ⇒ destination = usr.targetQueue.
+--   * Defer     — usr.nextAttemptAt is in the future ⇒ destination =
+--                 RetryInputQueue (re-queue, picked again next tick).
+--   * Escalate  — validation / loop / allowlist miss / exhausted ⇒
+--                 destination = RetryBoqQueue + boqReason / boqAt
+--                 stamped into MQRFH2.usr.
+--
+-- Body and MQRFH2 are passed through verbatim (other than the usr stamps
+-- on the Escalate path), so the producer's original SAMA SOAP and
+-- driving context survive the dispatcher.
+-- =====================================================================
+CREATE COMPUTE MODULE DispatchRetry_Inspect
+
+	-- Per-tick throttle state shared across loopback iterations within
+	-- the same execution group instance. Reset implicitly when the gap
+	-- between consecutive messages exceeds 5 s (i.e. a sleep happened).
+	DECLARE TickState SHARED ROW;
+
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		IF NOT EXISTS(Environment.Variables[]) THEN
+			CREATE FIELD Environment.Variables;
+			CREATE FIELD Environment.Variables.Request.Hdr;
+			CREATE FIELD Environment.Variables.Log4jInput;
+		END IF;
+
+		DECLARE EnvRef    REFERENCE TO Environment;
+		DECLARE EnvVarRef REFERENCE TO Environment.Variables;
+
+		CALL InitialiseLogging(EnvRef, 'TanfeethRetryDispatcher', LoggerName);
+
+		-- Pass the inbound message through verbatim.
+		SET OutputRoot             = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+
+		-- ----- Per-tick throttle ----------------------------------------
+		-- Detect tick boundary by inter-message gap. >5 s = we slept,
+		-- previous tick is over, start fresh.
+		DECLARE nowTs TIMESTAMP CURRENT_TIMESTAMP;
+		IF NOT EXISTS(TickState.count[])
+		   OR (EXISTS(TickState.lastMsgTs[])
+		       AND nowTs > TickState.lastMsgTs + INTERVAL '5' SECOND) THEN
+			SET TickState.count     = 0;
+			SET TickState.tickStart = nowTs;
+		END IF;
+
+		SET TickState.count     = COALESCE(TickState.count, 0) + 1;
+		SET TickState.lastMsgTs = nowTs;
+
+		-- ----- Read the shared MQRFH2.usr contract -----
+		DECLARE targetQueue   CHARACTER COALESCE(InputRoot.MQRFH2.usr.targetQueue, '');
+		DECLARE sourceApp     CHARACTER COALESCE(InputRoot.MQRFH2.usr.sourceApp, '');
+		DECLARE retryCount    INTEGER   COALESCE(CAST(InputRoot.MQRFH2.usr.retryCount AS INTEGER), 0);
+		DECLARE maxAttempts   INTEGER   COALESCE(CAST(InputRoot.MQRFH2.usr.maxAttempts AS INTEGER), 0);
+		DECLARE correlationId CHARACTER COALESCE(InputRoot.MQRFH2.usr.correlationId, '');
+		DECLARE nextAt        CHARACTER COALESCE(InputRoot.MQRFH2.usr.nextAttemptAt, '');
+
+		-- ----- Validate -----
+		DECLARE rejectReason CHARACTER '';
+
+		IF LENGTH(targetQueue) = 0 THEN
+			SET rejectReason = 'Missing usr.targetQueue';
+		ELSEIF targetQueue = RetryInputQueue THEN
+			SET rejectReason = 'Loop detected (targetQueue == RetryInputQueue)';
+		ELSEIF LENGTH(RetryAllowedTargets) > 0
+		       AND NOT isInCsv(targetQueue, RetryAllowedTargets) THEN
+			SET rejectReason = 'Target queue [' || targetQueue || '] not in allowlist';
+		ELSEIF maxAttempts > 0 AND retryCount >= maxAttempts THEN
+			SET rejectReason = 'Retries exhausted (retryCount=' || CAST(retryCount AS CHARACTER) ||
+			                   ' max=' || CAST(maxAttempts AS CHARACTER) || ')';
+		END IF;
+
+		IF LENGTH(rejectReason) > 0 THEN
+			-- ----- Escalate to BOQ -----
+			-- Ensure MQRFH2 exists in the correct position (after MQMD,
+			-- before any body domain). If the inbound message lacked
+			-- MQRFH2, blind assignment to OutputRoot.MQRFH2.usr.X creates
+			-- it as the LAST child — producing a put with the body
+			-- preceding the header, which the broker rejects with
+			-- MQRC_FORMAT_ERROR. CREATE NEXTSIBLING after MQMD keeps the
+			-- bitstream well-formed.
+			IF NOT EXISTS(OutputRoot.MQRFH2[]) THEN
+				CREATE NEXTSIBLING OF OutputRoot.MQMD DOMAIN('MQRFH2') NAME 'MQRFH2';
+				SET OutputRoot.MQRFH2.(MQRFH2.Field)Version        = 2;
+				SET OutputRoot.MQRFH2.(MQRFH2.Field)Format         = MQFMT_STRING;
+				SET OutputRoot.MQRFH2.(MQRFH2.Field)NameValueCCSID = 1208;
+				SET OutputRoot.MQMD.Format = MQFMT_RF_HEADER_2;
+			END IF;
+
+			SET OutputRoot.MQRFH2.usr.boqReason = rejectReason;
+			SET OutputRoot.MQRFH2.usr.boqAt     = CAST(CURRENT_TIMESTAMP AS CHARACTER FORMAT 'yyyy-MM-dd''T''HH:mm:ss');
+			SET OutputLocalEnvironment.Destination.MQ.DestinationData[1].queueName = RetryBoqQueue;
+
+			CALL writeInFile(EnvVarRef, 'ERROR',
+				'Retry rejected → BOQ: ' || rejectReason ||
+				' source=' || sourceApp ||
+				' corr=' || correlationId);
+
+		ELSEIF RetryHonourDelay AND LENGTH(nextAt) > 0
+		       AND nextAt > CAST(CURRENT_TIMESTAMP AS CHARACTER FORMAT 'yyyy-MM-dd''T''HH:mm:ss') THEN
+			-- ----- Defer (re-queue to RETRY, end tick) -----
+			-- The deferred message goes back to the same RETRY queue.
+			-- If we propagated via 'out' (looped to MQ_GET) the next get
+			-- would re-fetch the same deferred message and we'd spin.
+			-- Use 'out1' so the tick ends cleanly; next TimeoutNotification
+			-- tick picks it back up (and may defer again if still not due).
+			SET OutputLocalEnvironment.Destination.MQ.DestinationData[1].queueName = RetryInputQueue;
+
+			CALL writeInFile(EnvVarRef, 'INFO',
+				'Retry deferred (ending tick): nextAttemptAt=' || nextAt ||
+				' source=' || sourceApp ||
+				' corr=' || correlationId);
+
+			PROPAGATE TO TERMINAL 'out1';
+			RETURN FALSE;
+
+		ELSE
+			-- ----- Dispatch to producer's target queue -----
+			SET OutputLocalEnvironment.Destination.MQ.DestinationData[1].queueName = targetQueue;
+
+			CALL writeInFile(EnvVarRef, 'INFO',
+				'Retry dispatched: target=' || targetQueue ||
+				' source=' || sourceApp ||
+				' corr=' || correlationId ||
+				' retryCount=' || CAST(retryCount AS CHARACTER));
+		END IF;
+
+		-- ----- Cap check (after destination is set) ----------------------
+		-- This is the LAST message of the tick. Dispatch it normally via
+		-- the 'out1' terminal, whose downstream MQ Output is NOT looped
+		-- back to MQ_GET — so msg #(cap+1) stays on the queue at its
+		-- original position for the next tick.
+		IF TickState.count >= RetryMaxPerTick THEN
+			CALL writeInFile(EnvVarRef, 'WARN',
+				'RetryMaxPerTick (' || CAST(RetryMaxPerTick AS CHARACTER) ||
+				') reached — dispatching #' || CAST(TickState.count AS CHARACTER) ||
+				' and ending tick.');
+			PROPAGATE TO TERMINAL 'out1';
+			RETURN FALSE;
+		END IF;
+
+		RETURN TRUE;
+	END;
+
+	-- ---------------------------------------------------------------------
+	-- isInCsv — exact-match token presence in comma-separated value list.
+	-- ---------------------------------------------------------------------
+	CREATE FUNCTION isInCsv(IN token CHARACTER, IN csv CHARACTER) RETURNS BOOLEAN
+	BEGIN
+		DECLARE rest CHARACTER COALESCE(csv,'');
+		WHILE LENGTH(rest) > 0 DO
+			DECLARE commaPos INTEGER POSITION(',' IN rest);
+			DECLARE entry CHARACTER;
+			IF commaPos = 0 THEN
+				SET entry = TRIM(rest);
+				SET rest  = '';
+			ELSE
+				SET entry = TRIM(SUBSTRING(rest FROM 1 FOR commaPos - 1));
+				SET rest  = SUBSTRING(rest FROM commaPos + 1);
+			END IF;
+			IF entry = token THEN
+				RETURN TRUE;
+			END IF;
+		END WHILE;
+		RETURN FALSE;
+	END;
+END MODULE;

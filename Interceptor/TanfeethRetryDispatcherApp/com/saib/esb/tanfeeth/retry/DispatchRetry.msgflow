@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ecore:EPackage xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:ComIbmCompute.msgnode="ComIbmCompute.msgnode" xmlns:ComIbmMQGet.msgnode="ComIbmMQGet.msgnode" xmlns:ComIbmMQOutput.msgnode="ComIbmMQOutput.msgnode" xmlns:ComIbmTimeoutNotification.msgnode="ComIbmTimeoutNotification.msgnode" xmlns:ecore="http://www.eclipse.org/emf/2002/Ecore" xmlns:eflow="http://www.ibm.com/wbi/2005/eflow" xmlns:utility="http://www.ibm.com/wbi/2005/eflow_utility" nsURI="com/saib/esb/tanfeeth/retry/DispatchRetry.msgflow" nsPrefix="com_saib_esb_tanfeeth_retry_DispatchRetry.msgflow">
+  <eClassifiers xmi:type="eflow:FCMComposite" name="FCMComposite_1">
+    <eSuperTypes href="http://www.ibm.com/wbi/2005/eflow#//FCMBlock"/>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.RetryInputQueue" name="RetryInputQueue" defaultValueLiteral="SAIB.TANFEETH.RETRY">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EString"/>
+    </eStructuralFeatures>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.RetryBoqQueue" name="RetryBoqQueue" defaultValueLiteral="SAIB.TANFEETH.BOQ">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EString"/>
+    </eStructuralFeatures>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.RetryAllowedTargets" name="RetryAllowedTargets" defaultValueLiteral="SAIB.TANFEETH.NO_RELATION.OUT,SAIB.TANFEETH.INTERNAL.BLOCK.LIST">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EString"/>
+    </eStructuralFeatures>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.RetryHonourDelay" name="RetryHonourDelay" defaultValueLiteral="false">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EBoolean"/>
+    </eStructuralFeatures>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.RetryPollIntervalSec" name="RetryPollIntervalSec" defaultValueLiteral="30">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EInt"/>
+    </eStructuralFeatures>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.RetryMaxPerTick" name="RetryMaxPerTick" defaultValueLiteral="100">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EInt"/>
+    </eStructuralFeatures>
+    <eStructuralFeatures xmi:type="ecore:EAttribute" xmi:id="Property.LoggerName" name="LoggerName" defaultValueLiteral="TanfeethRetryDispatcher">
+      <eType xmi:type="ecore:EDataType" href="http://www.eclipse.org/emf/2002/Ecore#//EString"/>
+    </eStructuralFeatures>
+    <translation xmi:type="utility:TranslatableString" key="DispatchRetry" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+    <colorGraphic16 xmi:type="utility:GIFFileGraphic" resourceName="platform:/plugin/TanfeethRetryDispatcherApp/icons/full/obj16/DispatchRetry.gif"/>
+    <colorGraphic32 xmi:type="utility:GIFFileGraphic" resourceName="platform:/plugin/TanfeethRetryDispatcherApp/icons/full/obj30/DispatchRetry.gif"/>
+    <composition>
+      <nodes xmi:type="ComIbmTimeoutNotification.msgnode:FCMComposite_1" xmi:id="TIMEOUT" location="-27,203" uniqueIdentifier="TanfeethRetryDispatcher" timeoutInterval="30">
+        <translation xmi:type="utility:ConstantString" string="Tick (every RetryPollIntervalSec)"/>
+      </nodes>
+      <nodes xmi:type="ComIbmMQGet.msgnode:FCMComposite_1" xmi:id="MQGET" location="201,218" rotation="TOP_TO_BOTTOM" queueName="SAIB.TANFEETH.RETRY" messageDomainProperty="XMLNSC" transactionMode="no" waitInterval="0">
+        <translation xmi:type="utility:ConstantString" string="MQ Get (RETRY, peek)"/>
+      </nodes>
+      <nodes xmi:type="ComIbmCompute.msgnode:FCMComposite_1" xmi:id="INSPECT" location="369,321" computeExpression="esql://routine/com.saib.esb.tanfeeth.retry#DispatchRetry_Inspect.Main" computeMode="destinationAndMessage">
+        <translation xmi:type="utility:ConstantString" string="Inspect (target | RETRY | BOQ)"/>
+      </nodes>
+      <nodes xmi:type="ComIbmCompute.msgnode:FCMComposite_1" xmi:id="HANDLE_ERR" location="435,404" computeExpression="esql://routine/com.saib.esb.tanfeeth.retry#DispatchRetry_HandleError.Main" computeMode="destinationAndMessage">
+        <translation xmi:type="utility:ConstantString" string="HandleError"/>
+      </nodes>
+      <nodes xmi:type="ComIbmMQOutput.msgnode:FCMComposite_1" xmi:id="MQ_OUT" location="536,218" rotation="BOTTOM_TO_TOP" queueName="Dummy" destinationMode="list" newMsgId="true">
+        <translation xmi:type="utility:ConstantString" string="MQ Output (list: target | RETRY | BOQ)"/>
+      </nodes>
+      <nodes xmi:type="ComIbmMQOutput.msgnode:FCMComposite_1" xmi:id="MQ_OUT_LAST" location="536,440" queueName="Dummy" destinationMode="list" newMsgId="true">
+        <translation xmi:type="utility:ConstantString" string="MQ Output (last of tick — no loopback)"/>
+      </nodes>
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C01" targetNode="MQGET" sourceNode="TIMEOUT" sourceTerminalName="OutTerminal.out" targetTerminalName="InTerminal.in"/>
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C02" targetNode="INSPECT" sourceNode="MQGET" sourceTerminalName="OutTerminal.out" targetTerminalName="InTerminal.in"/>
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C03" targetNode="HANDLE_ERR" sourceNode="MQGET" sourceTerminalName="OutTerminal.failure" targetTerminalName="InTerminal.in"/>
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C04" targetNode="MQ_OUT" sourceNode="INSPECT" sourceTerminalName="OutTerminal.out" targetTerminalName="InTerminal.in"/>
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C05" targetNode="MQ_OUT" sourceNode="HANDLE_ERR" sourceTerminalName="OutTerminal.out" targetTerminalName="InTerminal.in"/>
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C06" targetNode="MQGET" sourceNode="MQ_OUT" sourceTerminalName="OutTerminal.out" targetTerminalName="InTerminal.in"/>
+      <!-- Last-of-tick: INSPECT.out1 fires only when RetryMaxPerTick is
+           reached. The current message is dispatched normally to its
+           target / RETRY / BOQ destination (set by INSPECT in list mode),
+           but via MQ_OUT_LAST which has NO loopback — so the next
+           message stays on the queue at its original position for the
+           next tick. -->
+      <connections xmi:type="eflow:FCMConnection" xmi:id="C07" targetNode="MQ_OUT_LAST" sourceNode="INSPECT" sourceTerminalName="OutTerminal.out1" targetTerminalName="InTerminal.in"/>
+    </composition>
+    <propertyOrganizer>
+      <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.RetryInputQueue">
+        <propertyName xmi:type="utility:TranslatableString" key="Property.RetryInputQueue" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+        <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.RetryBoqQueue">
+          <propertyName xmi:type="utility:TranslatableString" key="Property.RetryBoqQueue" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+          <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.RetryAllowedTargets">
+            <propertyName xmi:type="utility:TranslatableString" key="Property.RetryAllowedTargets" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+            <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.RetryHonourDelay">
+              <propertyName xmi:type="utility:TranslatableString" key="Property.RetryHonourDelay" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+              <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.RetryPollIntervalSec">
+                <propertyName xmi:type="utility:TranslatableString" key="Property.RetryPollIntervalSec" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+                <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.RetryMaxPerTick">
+                  <propertyName xmi:type="utility:TranslatableString" key="Property.RetryMaxPerTick" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+                  <propertyDescriptor groupName="Group.Basic" configurable="true" userDefined="true" describedAttribute="Property.LoggerName">
+                    <propertyName xmi:type="utility:TranslatableString" key="Property.LoggerName" bundleName="com/saib/esb/tanfeeth/retry/DispatchRetry" pluginId="TanfeethRetryDispatcherApp"/>
+                  </propertyDescriptor>
+                </propertyDescriptor>
+              </propertyDescriptor>
+            </propertyDescriptor>
+          </propertyDescriptor>
+        </propertyDescriptor>
+      </propertyDescriptor>
+    </propertyOrganizer>
+    <stickyBoard/>
+  </eClassifiers>
+</ecore:EPackage>

@@ -1,0 +1,80 @@
+BROKER SCHEMA com.saib.esb.tanfeeth.retry
+PATH com.saib.esb.tanfeeth.interceptor.common;
+
+-- =====================================================================
+-- DispatchRetry_HandleError
+--
+-- Routes the message to the shared BOQ in a repush-safe shape:
+--   * Body          = original payload (untouched)
+--   * MQRFH2 usr    = original usr fields (incl. targetQueue) +
+--                     boqReason / boqAt / exceptionList stamps.
+--
+-- Triggered by:
+--   * MQ Get catch / failure terminals.
+--
+-- NB: Inspect handles its own BOQ routing inline now, so this module is
+-- the catch-only handler. Environment.Variables.retry.* is NOT populated
+-- here (Inspect never ran) — the producer's context lives in
+-- InputRoot.MQRFH2.usr.* and is read directly for the diagnostic log.
+-- =====================================================================
+CREATE COMPUTE MODULE DispatchRetry_HandleError
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE EnvVarRef REFERENCE TO Environment.Variables;
+
+		-- Preserve the entire inbound message (body + MQRFH2 + MQMD)
+		-- so the BOQ row stays repush-able.
+		SET OutputRoot             = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+
+		-- The reason is always an exception or a get-failure.
+		DECLARE boqReason CHARACTER
+			CASE
+				WHEN EXISTS(InputExceptionList.*[]) THEN 'Exception in dispatcher flow'
+				ELSE 'MQ Get failure'
+			END;
+
+		-- Defensive MQRFH2 placement. If MQGET failed before producing a
+		-- well-formed message, InputRoot.MQRFH2 may be absent. Blind
+		-- assignment to OutputRoot.MQRFH2.usr.X would create MQRFH2 as
+		-- the LAST child (after any body domain) and the broker would
+		-- reject the put with MQRC_FORMAT_ERROR. Create the header in
+		-- the correct position when missing.
+		IF NOT EXISTS(OutputRoot.MQRFH2[]) THEN
+			IF NOT EXISTS(OutputRoot.MQMD[]) THEN
+				CREATE LASTCHILD OF OutputRoot DOMAIN 'MQMD' NAME 'MQMD';
+				SET OutputRoot.MQMD.Version        = MQMD_CURRENT_VERSION;
+				SET OutputRoot.MQMD.CodedCharSetId = 1208;
+				SET OutputRoot.MQMD.Encoding       = 546;
+				SET OutputRoot.MQMD.Persistence    = MQPER_PERSISTENT;
+			END IF;
+			CREATE NEXTSIBLING OF OutputRoot.MQMD DOMAIN('MQRFH2') NAME 'MQRFH2';
+			SET OutputRoot.MQRFH2.(MQRFH2.Field)Version        = 2;
+			SET OutputRoot.MQRFH2.(MQRFH2.Field)Format         = MQFMT_STRING;
+			SET OutputRoot.MQRFH2.(MQRFH2.Field)NameValueCCSID = 1208;
+			SET OutputRoot.MQMD.Format = MQFMT_RF_HEADER_2;
+		END IF;
+
+		-- Stamp diagnostics into usr without disturbing the producer's
+		-- existing fields (targetQueue, sourceApp, correlationId, etc.).
+		SET OutputRoot.MQRFH2.usr.boqReason = boqReason;
+		SET OutputRoot.MQRFH2.usr.boqAt     = CAST(CURRENT_TIMESTAMP AS CHARACTER FORMAT 'yyyy-MM-dd''T''HH:mm:ss');
+
+		IF EXISTS(InputExceptionList.*[]) THEN
+			SET OutputRoot.MQRFH2.usr.exceptionList = getExceptionAsJson(InputExceptionList);
+		END IF;
+
+		SET OutputLocalEnvironment.Destination.MQ.DestinationData[1].queueName = RetryBoqQueue;
+
+		-- Read context for the log directly from the inbound usr folder
+		-- (Environment.Variables.retry.* is empty on catch path because
+		-- Inspect never ran).
+		CALL writeInFile(EnvVarRef, 'ERROR',
+			'Retry → BOQ [' || RetryBoqQueue || ']: reason=' || boqReason ||
+			' source=' || COALESCE(InputRoot.MQRFH2.usr.sourceApp, '') ||
+			' target=' || COALESCE(InputRoot.MQRFH2.usr.targetQueue, '') ||
+			' corr='   || COALESCE(InputRoot.MQRFH2.usr.correlationId, ''));
+
+		RETURN TRUE;
+	END;
+END MODULE;

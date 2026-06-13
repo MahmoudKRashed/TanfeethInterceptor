@@ -1,0 +1,48 @@
+BROKER SCHEMA com.saib.esb.tanfeeth.retry
+
+-- =====================================================================
+-- AppConfig — TanfeethRetryDispatcherApp
+--
+-- Generic retry & BOQ dispatcher. Reads from SAIB.TANFEETH.RETRY and
+-- republishes every message to the queue named in MQRFH2.usr.targetQueue.
+-- Anything that can't be republished (missing/invalid targetQueue,
+-- exhausted retries, loop, allowlist miss, processing error) lands on
+-- SAIB.TANFEETH.BOQ with the diagnostics in usr.
+-- =====================================================================
+
+DECLARE LoggerName       EXTERNAL CHARACTER 'TanfeethRetryDispatcher';
+
+-- Single shared queues — all producers route to these.
+DECLARE RetryInputQueue  EXTERNAL CHARACTER 'SAIB.TANFEETH.RETRY';
+DECLARE RetryBoqQueue    EXTERNAL CHARACTER 'SAIB.TANFEETH.BOQ';
+
+-- Allowlist of legal targetQueue values (CSV). Empty string disables
+-- the check (any queue accepted). Recommended in prod to prevent
+-- accidental misroutes from a poisoned MQRFH2 header.
+DECLARE RetryAllowedTargets EXTERNAL CHARACTER
+    'SAIB.TANFEETH.NO_RELATION.OUT,SAIB.TANFEETH.INTERNAL.BLOCK.LIST';
+
+-- When TRUE, dispatcher honours usr.nextAttemptAt — messages whose
+-- next-attempt timestamp is in the future are re-queued onto RETRY
+-- unchanged. When FALSE, every message is dispatched immediately
+-- (cron-driven model, default).
+DECLARE RetryHonourDelay EXTERNAL BOOLEAN FALSE;
+
+-- =====================================================================
+-- Poll cadence — the flow is driven by a TimeoutNotification node, not
+-- a continuous MQ Input. Every RetryPollIntervalSec seconds the
+-- dispatcher wakes up, pulls one message from RetryInputQueue (if any),
+-- dispatches it, and goes back to sleep. Tune downward for higher
+-- throughput or upward for gentler back-off.
+-- =====================================================================
+DECLARE RetryPollIntervalSec EXTERNAL INTEGER 30;
+
+-- =====================================================================
+-- Per-tick throughput ceiling. The tick loops by feeding MQ_OUT back to
+-- MQ_GET; without a cap, a backend that keeps bouncing messages onto
+-- RETRY would cause the dispatcher to spin indefinitely within a single
+-- tick. After RetryMaxPerTick messages we re-queue the current one to
+-- RetryInputQueue via the spillover output (no loopback) and wait for
+-- the next tick. Set to a large value to effectively disable.
+-- =====================================================================
+DECLARE RetryMaxPerTick EXTERNAL INTEGER 100;
